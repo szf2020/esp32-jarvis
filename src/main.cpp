@@ -1,7 +1,7 @@
-#include "esp_https_server.h"
 #include "Arduino.h"
-#include "esp_camera.h"
 #include "WiFi.h"
+#include "esp_camera.h"
+#include "esp_http_server.h"
 
 const char* ssid = "MOVISTAR_6A18";
 const char* password = "TYRYTVCJTYVKX4TbJYPY";
@@ -36,13 +36,79 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     char * part_buf[64];
 
     // Header MJPEG
+    res = httpd_resp_set_type(req, "_stream");
+    if((res != ESP_OK) || 
+        (httpd_resp_set_hdr(req, "Content-Type", "multipart/x-mixed-replace;boundary=frame") != ESP_OK)) {
+            return ESP_FAIL;
+        }
+
+    // Loop Streaming
+    while (true)
+    {
+        fb = esp_camera_fb_get();
+        if (!fb) {
+            Serial.println("Camera capture failed");
+            res = ESP_FAIL;
+        } else {
+            _jpg_buf_len = fb->len;
+            _jpg_buf = fb->buf;
+        }
+
+        if (res == ESP_OK) {
+            // send boundary each frame
+            size_t hlen = snprintf((char *)part_buf, 64, "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", _jpg_buf_len);
+            res = httpd_resp_send_chunk(req, (const char *)part_buf, hlen);
+        }
+        if (res == ESP_OK) {
+            res = httpd_resp_send_chunk(req, (const char *)_jpg_buf, _jpg_buf_len);
+        }
+        if (res == ESP_OK){
+            res = httpd_resp_send_chunk(req, "\r\n--frame\r\n", 12);
+        }
+        if (fb) {
+            esp_camera_fb_return(fb);
+            fb = NULL;
+            _jpg_buf = NULL;
+        } else if (_jpg_buf) {
+            free(_jpg_buf);
+            _jpg_buf = NULL;
+        }
+
+        if (res != ESP_OK) {
+            break;
+        }
+    }
+    return res;
 }
 
-void startCameraServer();
+void startCameraServer(){
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = 80;
+
+    httpd_uri_t index_uri = {
+        .uri    = "/",
+        .method = HTTP_GET,
+        .handler = stream_handler,
+        .user_ctx = NULL
+    };
+
+    Serial.printf("Attempting to start server on port: '%d'\n", config.server_port);
+
+    esp_err_t res = httpd_start(&stream_httpd, &config);
+
+    if(res == ESP_OK) {
+        httpd_register_uri_handler(stream_httpd, &index_uri);
+        Serial.println(">>> SERVER STARTED SUCCESSFULLY! <<<");
+    } else {
+        Serial.printf("!!! Server Failed to Start!! error Code: 0x%x\n", res);
+        Serial.println("Check: Sisa Memory (Heap)? Konflik Port?");
+    }
+};
 
 void setup() {
     Serial.begin(115200);
     Serial.setDebugOutput(true);
+    delay(2000);
     Serial.println();
 
     // checking the PSRAM
@@ -69,8 +135,8 @@ void setup() {
     config.pin_pclk = PCLK_GPIO_NUM;
     config.pin_vsync = VSYNC_GPIO_NUM;
     config.pin_href = HREF_GPIO_NUM;
-    config.pin_sscb_sda = SIOD_GPIO_NUM;
-    config.pin_sscb_scl = SIOC_GPIO_NUM;
+    config.pin_sccb_sda = SIOD_GPIO_NUM;
+    config.pin_sccb_scl = SIOC_GPIO_NUM;
     config.pin_pwdn = PWDN_GPIO_NUM;
     config.pin_reset = RESET_GPIO_NUM;
     config.xclk_freq_hz = 20000000;
@@ -109,7 +175,7 @@ void setup() {
     // Start Server
     Serial.print("Camera Ready! use 'http://");
     Serial.print(WiFi.localIP());
-    Serial.println("' to Connect");
+    Serial.println("/' to Connect");
 }
 
 void loop() {
